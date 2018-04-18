@@ -27,6 +27,9 @@
 #include "trace.h"
 #include "pmu.h"
 
+bool is_cmpe_set = false, is_custom_set = false;
+u32 eax_custom, ebx_custom, ecx_custom, edx_custom;
+
 static u32 xstate_required_size(u64 xstate_bv, bool compacted)
 {
 	int feature_bit = 0;
@@ -904,21 +907,58 @@ out:
 		*edx = best->edx;
 	} else
 		*eax = *ebx = *ecx = *edx = 0;
+	
 	trace_kvm_cpuid(function, *eax, *ebx, *ecx, *edx, entry_found);
 	return entry_found;
 }
 EXPORT_SYMBOL_GPL(kvm_cpuid);
 
 int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
-{
+{		
 	u32 eax, ebx, ecx, edx;
-
 	if (cpuid_fault_enabled(vcpu) && !kvm_require_cpl(vcpu, 0))
 		return 1;
 
 	eax = kvm_register_read(vcpu, VCPU_REGS_RAX);
 	ecx = kvm_register_read(vcpu, VCPU_REGS_RCX);
-	kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
+	
+	if ( eax == 0x4fffffff)
+	{	
+		printk("changed the value of cmpe set");
+		is_cmpe_set= !is_cmpe_set;
+	}
+	else if ( eax == 0 && is_cmpe_set==true )
+	{
+		printk("Entered the modified section");
+		if(is_custom_set)
+		{
+			ebx = ebx_custom;
+			ecx = ecx_custom;
+			edx = edx_custom;
+			is_custom_set = false;
+		} else
+		{		
+			ebx = 0x45504d43;
+			ecx = 0x45504d43;
+			edx = 0x3338325f;
+		}
+	}
+	else if(eax == 0x4ffffffe)
+	{	
+		if(is_custom_set == false)
+			is_custom_set = !is_custom_set;
+		eax_custom = kvm_register_read(vcpu, VCPU_REGS_RAX);
+		ebx_custom = kvm_register_read(vcpu, VCPU_REGS_RBX);
+		ecx_custom = kvm_register_read(vcpu, VCPU_REGS_RCX);
+		edx_custom = kvm_register_read(vcpu, VCPU_REGS_RDX);
+
+	}
+	else
+        {	
+		kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
+		
+	}
+
 	kvm_register_write(vcpu, VCPU_REGS_RAX, eax);
 	kvm_register_write(vcpu, VCPU_REGS_RBX, ebx);
 	kvm_register_write(vcpu, VCPU_REGS_RCX, ecx);
