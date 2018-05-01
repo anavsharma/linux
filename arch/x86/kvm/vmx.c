@@ -54,6 +54,8 @@
 #include <asm/microcode.h>
 #include <asm/nospec-branch.h>
 
+#include<asm/msr.h>
+
 #include "trace.h"
 #include "pmu.h"
 
@@ -64,6 +66,86 @@
 MODULE_AUTHOR("Qumranet");
 MODULE_LICENSE("GPL");
 
+int counters[65] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+long total_exits = 0;
+long threshold = 2000;
+int loopcounter = 0;
+unsigned long long max_cycles[65] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+unsigned long long min_cycles[65] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+unsigned long long cycles[65] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+
+char *exit_description[65] ={
+	"NMI",
+	"External interrupt",
+	"Triple Fault",
+	"INIT signal",
+	"Start-up IPI (SIPI)",
+	"I/O system-management interrupt (SMI)",
+	"Other SMI",
+	"Interrupt window",
+	"NMI window",
+	"Task switch",
+	"CPUID",
+	"GETSEC",
+	"HLT",
+	"INVLD",
+	"INVLPG",
+	"RDPMC",
+	"RDTSC",
+	"RSM",
+	"VMCALL",
+	"VMCLEAR",
+	"VMLAUNCH",
+	"VMPTRLD",
+	"VMPTRST",
+	"VMREAD",
+	"VMRESUME",
+	"VMWRITE",
+	"VMXOFF",
+	"VMXON",
+	"Control-register accesses",
+	"MOV DR",
+	"I/O instruction",
+	"RDMSR",
+	"WRMSR",
+	"invalid guest state",
+	"MSR loading failure",
+	"NA",
+	"MWAIT",
+	"Monitor trap flag",
+	"NA",
+	"MONITOR",
+	"PAUSE",
+	"machine-check event failure",
+	"NA",
+	"TPR below Threshold",
+	"APIC access",
+	"Virtualized EOI",
+	"Access to GDTR or IDTR",
+	"Access to LDTR or TR",
+	"EPT violation",
+	"EPT misconfiguration",
+	"INVEPT",
+	"RDTSCP",
+	"VMX-preemption timer expired",
+	"INVVPID",
+	"WBINVD",
+	"XSETBV",
+	"APIC write",
+	"RDRAND",
+	"INVPCID",
+	"VMFUNC",
+	"ENCLS",
+	"RDSEED",
+	"Page-modification log full",
+	"XSAVES",
+	"XRSTORS"	
+};
+static __inline__ unsigned long long rdtsc_custom(void){
+	unsigned long long int x;
+	__asm__ volatile (".byte 0x0f, 0x31" : "=A" (x));
+	return x;
+}
 static const struct x86_cpu_id vmx_cpu_id[] = {
 	X86_FEATURE_MATCH(X86_FEATURE_VMX),
 	{}
@@ -8887,7 +8969,12 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu)
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	u32 exit_reason = vmx->exit_reason;
 	u32 vectoring_info = vmx->idt_vectoring_info;
-
+	//declaring variables
+	int i;
+	unsigned long long start, end;
+	int retVal = -10;
+	++total_exits;
+	start = rdtsc_custom();
 	trace_kvm_exit(exit_reason, vcpu, KVM_ISA_VMX);
 
 	/*
@@ -8902,24 +8989,26 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu)
 
 	/* If guest state is invalid, start emulating */
 	if (vmx->emulation_required)
-		return handle_invalid_guest_state(vcpu);
+		retVal = handle_invalid_guest_state(vcpu);
 
-	if (is_guest_mode(vcpu) && nested_vmx_exit_reflected(vcpu, exit_reason))
-		return nested_vmx_reflect_vmexit(vcpu, exit_reason);
+	if (retVal == -10 && is_guest_mode(vcpu) && nested_vmx_exit_reflected(vcpu, exit_reason))
+		retVal = nested_vmx_reflect_vmexit(vcpu, exit_reason);
 
-	if (exit_reason & VMX_EXIT_REASONS_FAILED_VMENTRY) {
+
+
+	if (retVal == -10 && exit_reason & VMX_EXIT_REASONS_FAILED_VMENTRY) {
 		dump_vmcs();
 		vcpu->run->exit_reason = KVM_EXIT_FAIL_ENTRY;
 		vcpu->run->fail_entry.hardware_entry_failure_reason
 			= exit_reason;
-		return 0;
+		retVal = 0;
 	}
 
-	if (unlikely(vmx->fail)) {
+	if (retVal == -10 && unlikely(vmx->fail)) {
 		vcpu->run->exit_reason = KVM_EXIT_FAIL_ENTRY;
 		vcpu->run->fail_entry.hardware_entry_failure_reason
 			= vmcs_read32(VM_INSTRUCTION_ERROR);
-		return 0;
+		retVal = 0;
 	}
 
 	/*
@@ -8929,7 +9018,7 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu)
 	 * The vm-exit can be triggered again after return to guest that
 	 * will cause infinite loop.
 	 */
-	if ((vectoring_info & VECTORING_INFO_VALID_MASK) &&
+	if (retVal == -10 && (vectoring_info & VECTORING_INFO_VALID_MASK) &&
 			(exit_reason != EXIT_REASON_EXCEPTION_NMI &&
 			exit_reason != EXIT_REASON_EPT_VIOLATION &&
 			exit_reason != EXIT_REASON_PML_FULL &&
@@ -8945,7 +9034,7 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu)
 			vcpu->run->internal.data[3] =
 				vmcs_read64(GUEST_PHYSICAL_ADDRESS);
 		}
-		return 0;
+		retVal = 0;
 	}
 
 	if (unlikely(!enable_vnmi &&
@@ -8967,15 +9056,47 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu)
 		}
 	}
 
-	if (exit_reason < kvm_vmx_max_exit_handlers
+	if (retVal == -10 && exit_reason < kvm_vmx_max_exit_handlers
 	    && kvm_vmx_exit_handlers[exit_reason])
-		return kvm_vmx_exit_handlers[exit_reason](vcpu);
+		retVal = kvm_vmx_exit_handlers[exit_reason](vcpu);
 	else {
 		vcpu_unimpl(vcpu, "vmx: unexpected exit reason 0x%x\n",
 				exit_reason);
 		kvm_queue_exception(vcpu, UD_VECTOR);
-		return 1;
+		retVal = 1;
 	}
+	end = rdtsc_custom() - start;
+
+	//increment counters
+	if((int)exit_reason >=0 && (int)exit_reason < 65){
+		counters[(int)exit_reason]++;
+		cycles[(int)exit_reason] += end;
+		
+		if(max_cycles[(int)exit_reason]<end){
+			max_cycles[(int)exit_reason] = end;
+		}
+
+		if(min_cycles[(int)exit_reason] == 0){
+			min_cycles[(int)exit_reason] = end;
+		}else if(min_cycles[(int)exit_reason] > end){
+			min_cycles[(int)exit_reason]=end;
+		}
+	}
+
+	//print details
+	if(total_exits%threshold == 0){
+		printk("=====================================================================================");		
+		printk("\t Total exits: %ld", total_exits);
+		for(i=0; i<65; i++){
+			if(strcmp(exit_description[i], "NA")!=0){
+				if(counters[i]!=0){
+					printk("Exit reason: %s \t\t\t\n Exits: %d \t\t Average: %llu \t\t Max: %llu \t\t Min: %llu\n\n", exit_description[i], counters[i], (cycles[i]/(unsigned long long) counters[i]), max_cycles[i], min_cycles[i]);
+				} 
+			}
+		}
+		printk("=====================================================================================");		
+	}
+	return retVal;		
 }
 
 static void update_cr8_intercept(struct kvm_vcpu *vcpu, int tpr, int irr)
